@@ -1,12 +1,44 @@
 /*
  * Study From WebBench-1.5 Under GPLv2
  *
- * weiqiangdragonite@gmail.com
+ * <weiqiangdragonite@gmail.com>
  *
- * Format: 8 Tab(Linux Kernel Coding Style)
+ * Style: 8 Tab
  */
 
 #include <stdio.h>
+
+/* Marco */
+#define PROGRAM_VERSION	"1.5"
+
+/* Global variables */
+int force = 0;		/* ?? */
+int force_reload = 0;	/* ?? */
+int http_v = 1;		/* 0 - http/0.9, 1 - http/1.0, 2 - http/1.1 */
+int bench_time = 30;	/* run benchmark for 30 sec (default) */
+int clients = 1;	/* run n http clients, default n = 1 */
+char *proxy_host = NULL;
+int proxy_port = 80;
+
+
+/* long options structure */
+static const struct option long_options[] = {
+	{"force", no_argument, &force, 1},
+	{"reload", no_argument, *force_reload, 1},
+	{"time", required_argument, NULL, 't'},
+	{"help", no_argument, NULL, 'h'},
+	{"http09", no_argument, NULL, '9'},
+	{"http10", no_argument, NULL, '1'},
+	{"http11", no_argument, NULL, '2'},
+	{"get", no_argument, &method, METHOD_GET},
+	{"head", no_argument, &method, METHOD_HEAD},
+	{"options", no_argument, &method, METHOD_OPTIONS},
+	{"trace", no_argument, &method, METHOD_TRACE},
+	{"version", no_argument, NULL, 'v'},
+	{"proxy", required_argument, NULL, 'p'},
+	{"clients", required_argument, NULL, 'c'},
+	{0, 0, 0, 0}
+};
 
 
 /* Function prototypes */
@@ -20,17 +52,106 @@ void usage(void);
  * Return:
  *	0 - success
  *	1 - bad paramaters
- *	
+ *	2 - benchmark failed (server is not on-line)
+ *	3 - internal error, fork failed
  */
 int
 main(int argc, char *argv[])
 {
+	int opt;
+	int options_index = 0;	/* not used */
+	char *optstring = ":h912vfrt:p:c:";
+	char *tmp = NULL;
+
 	/* check for command paramaters */
 
 	if (argc == 1) {
 		usage();
 		return 2;
 	}
+
+	/* process arguments - glibc: getopt_long() */
+	while (1) {
+		opt = getopt_long(argc, argv, optstring,
+			long_options, &options_index);
+		if (opt == -1)
+			break;
+
+		switch (opt) {
+		/* For long option, if flag is NULL, then return val, otherwise
+		return 0 and flag point to val. */
+		case 0:
+			break;
+		case 'f':
+			force = 1;
+			break;
+		case 'r':
+			force_reload = 1;
+			break;
+		case '9':
+			http_v = 0;
+			break;
+		case '1':
+			http_v = 1;
+			break;
+		case '2':
+			http_v = 2;
+			break;
+		case 't':
+			bench_time = atoi(optarg);
+			break;
+		case 'p':
+			/* proxy server parsing - "server:port" */
+			/* strrchr() - find character from the end */
+			tmp = strrchr(optarg, ':');
+			proxy_host = optarg;
+			if (tmp == NULL)
+				break;
+			if (tmp == optarg) {
+				fprintf(stderr, "Error in option --proxy %s "
+					"(Missing hostname)\n", optarg);
+				return 1;
+			}
+			if (tmp == (optarg + strlen(optarg) - 1)) {
+				fprintf(stderr, "Error in option --proxy %s "
+					"(Missing prot number)", optarg);
+				return 1;
+			}
+			//*tmp = '\0'; ??
+			proxy_port = atoi(tmp + 1);
+			break;
+		case 'c':
+			clients = atoi(optarg);
+			break;
+		case 'v':
+			printf("WebBench %s\n", PROGRAM_VERSION);
+			return 0;
+		case ':':
+			fprintf(stderr, "Missing argument (-%c)\n", optopt);
+		case '?':
+			fprintf(stderr, "Unrecognized option (-%c)\n", optopt);
+		case 'h':
+		default:
+			usage();
+			return 1;
+		}
+	}
+
+	if (optind == argc) {
+		fprintf(stderr, "webbench: Missing URL!\n");
+		usage();
+		return 1;
+	}
+
+	if (clients == 0)
+		clients = 1;
+	if (bench_time == 0)
+		benchtime = 30;
+
+	/* Print Copyright */
+	/* Why use stderr? because un-buffer? */
+	fprintf(stderr, "WebBench - Simple Web Benchmark "PROGRAM_VERSION"\n"
+		"Copyright (c)  Radim Kolar 1997-2004, GPL Open Source Software.\n");
 }
 
 /*
