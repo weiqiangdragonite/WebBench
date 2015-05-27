@@ -7,16 +7,27 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <getopt.h>
 
 /* Marco */
 #define PROGRAM_VERSION	"1.5"
 
+/* Allow: GET, HEAD, OPTIONS, TRACE */
+#define METHOD_GET	0
+#define METHOD_HEAD	1
+#define METHOD_OPTIONS	2
+#define METHOD_TRACE	3
+
 /* Global variables */
 int force = 0;		/* ?? */
 int force_reload = 0;	/* ?? */
-int http_v = 1;		/* 0 - http/0.9, 1 - http/1.0, 2 - http/1.1 */
+int http_ver = 1;	/* 0 - http/0.9, 1 - http/1.0, 2 - http/1.1 */
 int bench_time = 30;	/* run benchmark for 30 sec (default) */
 int clients = 1;	/* run n http clients, default n = 1 */
+int method = METHOD_GET;	/* HTTP method */
 char *proxy_host = NULL;
 int proxy_port = 80;
 
@@ -24,7 +35,7 @@ int proxy_port = 80;
 /* long options structure */
 static const struct option long_options[] = {
 	{"force", no_argument, &force, 1},
-	{"reload", no_argument, *force_reload, 1},
+	{"reload", no_argument, &force_reload, 1},
 	{"time", required_argument, NULL, 't'},
 	{"help", no_argument, NULL, 'h'},
 	{"http09", no_argument, NULL, '9'},
@@ -89,13 +100,13 @@ main(int argc, char *argv[])
 			force_reload = 1;
 			break;
 		case '9':
-			http_v = 0;
+			http_ver = 0;
 			break;
 		case '1':
-			http_v = 1;
+			http_ver = 1;
 			break;
 		case '2':
-			http_v = 2;
+			http_ver = 2;
 			break;
 		case 't':
 			bench_time = atoi(optarg);
@@ -103,6 +114,8 @@ main(int argc, char *argv[])
 		case 'p':
 			/* proxy server parsing - "server:port" */
 			/* strrchr() - find character from the end */
+			/* still cannot check come bad parameters, such
+			xxx:xxx:xxx:ddd */
 			tmp = strrchr(optarg, ':');
 			proxy_host = optarg;
 			if (tmp == NULL)
@@ -114,20 +127,23 @@ main(int argc, char *argv[])
 			}
 			if (tmp == (optarg + strlen(optarg) - 1)) {
 				fprintf(stderr, "Error in option --proxy %s "
-					"(Missing prot number)", optarg);
+					"(Missing prot number)\n", optarg);
 				return 1;
 			}
-			//*tmp = '\0'; ??
+			/* Be careful --> *tmp = '\0' is to end the host string */
+			*tmp = '\0';
 			proxy_port = atoi(tmp + 1);
 			break;
 		case 'c':
 			clients = atoi(optarg);
 			break;
 		case 'v':
-			printf("WebBench %s\n", PROGRAM_VERSION);
+			printf("WebBench "PROGRAM_VERSION"\n");
 			return 0;
 		case ':':
 			fprintf(stderr, "Missing argument (-%c)\n", optopt);
+			usage();
+			return 1;
 		case '?':
 			fprintf(stderr, "Unrecognized option (-%c)\n", optopt);
 		case 'h':
@@ -146,12 +162,14 @@ main(int argc, char *argv[])
 	if (clients == 0)
 		clients = 1;
 	if (bench_time == 0)
-		benchtime = 30;
+		bench_time = 30;
 
 	/* Print Copyright */
 	/* Why use stderr? because un-buffer? */
 	fprintf(stderr, "WebBench - Simple Web Benchmark "PROGRAM_VERSION"\n"
 		"Copyright (c)  Radim Kolar 1997-2004, GPL Open Source Software.\n");
+
+	return 0;
 }
 
 /*
@@ -174,6 +192,6 @@ usage(void)
 		"  --head                   Use HEAD request method.\n"
 		"  --options                Use OPTIONS request method.\n"
 		"  --trace                  Use TRACE request method.\n"
-		"  -?|-h|--help             This information.\n"
-		"  -V|--version             Display program version.\n");
+		"  -h|--help                This information.\n"
+		"  -v|--version             Display program version.\n");
 }
