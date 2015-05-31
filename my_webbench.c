@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <getopt.h>
+#include <errno.h>
 
 #include <netdb.h>
 
@@ -25,19 +26,20 @@
 
 
 /* Global variables */
-int force = 0;		/* ?? */
-int force_reload = 0;	/* ?? */
+int force = 0;		/* set if wait for server reply */
+int force_reload = 0;	/* reload request */
 int http_ver = 1;	/* 0 - http/0.9, 1 - http/1.0, 2 - http/1.1 */
 int bench_time = 30;	/* run benchmark for 30 sec (default) */
 int clients = 1;	/* run n http clients, default n = 1 */
 int method = METHOD_GET;	/* HTTP method */
-char *proxy_host = NULL;
-int proxy_port = 80;
+char *proxy_host = NULL;	/* proxy host address */
+int proxy_port = 80;		/* proxy port, also default http 80 port */
 
 char host[NI_MAXHOST];
 #define REQUEST_SIZE	2048
-char request[REQUEST_SIZE];
+char request[REQUEST_SIZE];	/* HTTP request header */
 
+int mypipe[2];		/* internal */
 
 /* long options structure */
 static const struct option long_options[] = {
@@ -62,6 +64,8 @@ static const struct option long_options[] = {
 /* Function prototypes */
 void usage(void);
 void build_request(const char *url);
+int bench(void);
+int inet_connect(const char *host, int port, int type);
 
 
 /*
@@ -177,7 +181,54 @@ main(int argc, char *argv[])
 
 	build_request(argv[optind]);
 
-	return 0;
+
+	/* print bench info */
+	printf("\nBenchmarking: ");
+	switch (method) {
+	case METHOD_OPTIONS:
+		printf("OPTIONS");
+		break;
+	case METHOD_HEAD:
+		printf("HEAD");
+		break;
+	case METHOD_TRACE:
+		printf("TRACE");
+		break;
+	case METHOD_GET:
+	default:
+		printf("GET");
+		break;
+	}
+	printf(" %s", argv[optind]);
+
+	switch (http_ver) {
+	case 0:
+		printf("HTTP/0.9");
+		break;
+	case 2:
+		printf(" HTTP/1.1");
+		break;
+	case 1:
+	default:
+		printf(" HTTP/1.0");
+		break;
+	}
+	printf("\n");
+
+	if (clients == 1)
+		printf("1 client");
+	else
+		printf("%d clients", clients);
+	printf(", running %d sec", bench_time);
+	if (force)
+		printf(", early socket close");
+	if (proxy_host != NULL)
+		printf(", via proxy server %s:%d", proxy_host, proxy_port);
+	if (force_reload)
+		printf(", forcing reload");
+	printf(".\n");
+
+	return bench();
 }
 
 /*
@@ -205,7 +256,7 @@ usage(void)
 }
 
 /*
- * build the reuqest header, such:
+ * Build the reuqest header, such:
  * GET /abc HTTP/1.0\r\n
  * Connection: close\r\n
  * \r\n
@@ -219,16 +270,20 @@ build_request(const char *url)
 	memset(request, 0, REQUEST_SIZE);
 	memset(host, 0, NI_MAXHOST);
 
-	/* I don't understand */
+	/* Need HTTP knowledge to know why */
+	/* Proxy and force reload need HTTP/1.0 or HTTP/1.1 */
 	if (force_reload && proxy_host != NULL && http_ver < 1)
 		http_ver = 1;
 
+	/* HEAD need HTTP/1.0 or HTTP/1.1 */
 	if (method == METHOD_HEAD && http_ver < 1)
 		http_ver = 1;
 
+	/* Options need HTTP/1.1 */
 	if (method == METHOD_OPTIONS && http_ver < 2)
 		http_ver = 2;
 
+	/* TRACE need HTTP/1.1 */
 	if (method == METHOD_TRACE && http_ver < 2)
 		http_ver = 2;
 
@@ -285,7 +340,7 @@ build_request(const char *url)
 		if (index(url+i, ':') != NULL &&
 		(index(url+i, ':') < index(url+i, '/'))) {
 			strncpy(host, url+i, strchr(url+i, ':') - url - i);
-			memset(tmp, 0, 10);
+			memset(tmp, 0, sizeof(tmp));
 			strncpy(tmp, index(url+i, ':') + 1,
 				strchr(url+i, '/') - index(url+i, ':') - 1);
 			proxy_port = atoi(tmp);
@@ -314,6 +369,7 @@ build_request(const char *url)
 		strcat(request, "\r\n");
 	}
 
+	/* Not understand */
 	if (force_reload && proxy_host != NULL)
 		strcat(request, "Pragma: no-cache\r\n");
 
@@ -324,3 +380,98 @@ build_request(const char *url)
 	if (http_ver > 0)
 		strcat(request, "\r\n");
 }
+
+/*
+ *
+ */
+int
+bench(void)
+{
+	int i, j, k;
+	FILE *f;
+	pid_t pid = 0;
+
+	/* check avaibility of target server */
+	i = inet_connect(proxy_host == NULL ? host : proxy_host,
+		proxy_port, SOCK_STREAM);
+	if (i < 0) {
+		fprintf(stderr, "\nConnect to server failed. Aborting benchmark.\n");
+		return 2;
+	}
+	close(i);
+
+	/* create pipe */
+	if (pipe(mypipe) == -1) {
+		perror("pipe failed.");
+		return 3;
+	};
+
+	/* fork childs */
+	return 0;
+}
+
+/*
+ * Copy from TLPI
+ *
+ * This function creates a socket with the given socket type, and connects it
+ * to the address specified by host and service. This function is designed for
+ * TCP or UDP clients that need to connect their socket to a server socket.
+ */
+int
+inet_connect(const char *host, int port, int type)
+{
+	struct addrinfo hints;
+	struct addrinfo *result, *rp;
+	int socket_fd;
+	char service[NI_MAXSERV];
+
+	memset(service, 0, NI_MAXSERV);
+	snprintf(service, NI_MAXSERV, "%d", port);
+
+	/* Set the hints argument */
+	memset(&hints, 0, sizeof(struct addrinfo));
+	hints.ai_canonname = NULL;
+	hints.ai_addr = NULL;
+	hints.ai_next = NULL;
+	/* User define socket type (SOCK_STREAM or SOCK_DGRAM) */
+	hints.ai_socktype = type;
+	/* ai_protocol = 0;
+	   For our purposes, this field is always specified as 0, meaning that
+	   the caller will accept any protocol */
+	/* Allows IPv4 or IPv6 */
+	hints.ai_family = AF_UNSPEC;
+
+	/* get a list of socket address */
+	if (getaddrinfo(host, service, &hints, &result) != 0) {
+		fprintf(stderr, "getaddrinfo() failed: %s\n", strerror(errno));
+		return -1;
+	}
+
+	/* Walk through returned list until we find an address structure that
+	   can be used to successfully connect a socket */
+	for (rp = result; rp != NULL; rp = rp->ai_next) {
+		socket_fd = socket(rp->ai_family, rp->ai_socktype,
+			rp->ai_protocol);
+
+		/* If error, try next address */
+		if (socket_fd == -1)
+			continue;
+
+		/* Try to connect socket */
+		if (connect(socket_fd, rp->ai_addr, rp->ai_addrlen) != -1)
+			break;
+
+		/* Connect failed: close this socket and try next address */
+		close(socket_fd);
+	}
+
+	/* We must free the struct addrinfo */
+	freeaddrinfo(result);
+
+	/* Return the socket_fd or -1 is error */
+	return (rp == NULL) ? -1 : socket_fd;
+}
+
+
+
+
