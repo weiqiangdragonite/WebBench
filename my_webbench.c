@@ -12,6 +12,7 @@
 #include <string.h>
 #include <getopt.h>
 #include <errno.h>
+#include <signal.h>
 
 #include <netdb.h>
 
@@ -26,8 +27,8 @@
 
 
 /* Global variables */
-int force = 0;		/* set if wait for server reply */
-int force_reload = 0;	/* reload request */
+int force = 0;		/* set 0 to wait for server reply */
+int force_reload = 0;	/* reload request - no cache */
 int http_ver = 1;	/* 0 - http/0.9, 1 - http/1.0, 2 - http/1.1 */
 int bench_time = 30;	/* run benchmark for 30 sec (default) */
 int clients = 1;	/* run n http clients, default n = 1 */
@@ -39,7 +40,11 @@ char host[NI_MAXHOST];
 #define REQUEST_SIZE	2048
 char request[REQUEST_SIZE];	/* HTTP request header */
 
-int mypipe[2];		/* internal */
+int mypipe[2];			/* internal */
+int speed = 0;
+int failed = 0;			/* failed counter */
+int bytes = 0;			/* recv bytes form socket */
+volatile int timer_expired = 0;
 
 /* long options structure */
 static const struct option long_options[] = {
@@ -66,6 +71,8 @@ void usage(void);
 void build_request(const char *url);
 int bench(void);
 int inet_connect(const char *host, int port, int type);
+static void alarm_handler(int signal);
+void bench_core(const char *host, const int port, const char *req);
 
 
 /*
@@ -203,7 +210,7 @@ main(int argc, char *argv[])
 
 	switch (http_ver) {
 	case 0:
-		printf("HTTP/0.9");
+		printf(" HTTP/0.9");
 		break;
 	case 2:
 		printf(" HTTP/1.1");
@@ -352,7 +359,7 @@ build_request(const char *url)
 		/* printf("strcspn(url+i, /) = %d\n", (int) strcspn(url+i, "/")); */
 		strcat(request + strlen(request), url + i + strcspn(url+i, "/"));
 	} else {
-		/* why? I don't understand proxy */
+		/* Need proxy knowledge */
 		strcat(request, url);
 	}
 	printf("rqeuest = %s\n", request);
@@ -369,7 +376,7 @@ build_request(const char *url)
 		strcat(request, "\r\n");
 	}
 
-	/* Not understand */
+	/* no-cache */
 	if (force_reload && proxy_host != NULL)
 		strcat(request, "Pragma: no-cache\r\n");
 
@@ -377,6 +384,7 @@ build_request(const char *url)
 	if (http_ver > 1)
 		strcat(request, "Connection: close\r\n");
 
+	/* The last blank line */
 	if (http_ver > 0)
 		strcat(request, "\r\n");
 }
@@ -387,7 +395,7 @@ build_request(const char *url)
 int
 bench(void)
 {
-	int i, j, k;
+	int i, j, k, r;
 	FILE *f;
 	pid_t pid = 0;
 
@@ -402,12 +410,182 @@ bench(void)
 
 	/* create pipe */
 	if (pipe(mypipe) == -1) {
-		perror("pipe failed.");
+		perror("PIPE failed: ");
 		return 3;
 	};
 
 	/* fork childs */
+	for (i = 0; i < clients; ++i) {
+		pid = fork();
+		if (pid <= (pid_t) 0) {
+			/* child process or error */
+			/* make childs faster */
+			sleep(1);
+			break;
+		}
+	}
+
+	/* error */
+	if (pid < (pid_t) 0) {
+		fprintf(stderr, "Problems forking client No.%d\n", i);
+		perror("Fork failed: ");
+		return 3;
+	}
+
+	/* child */
+	if (pid == (pid_t) 0) {
+		if (proxy_host == NULL)
+			bench_core(host, proxy_port, request);
+		else
+			bench_core(proxy_host, proxy_port, request);
+
+		/* write results to pipe */
+		/* pipe[0] for read; pipe[1] for write */
+		f = fdopen(mypipe[1], "w");
+		if (f == NULL) {
+			perror("Open pipe for write failed: ");
+			return 3;
+		}
+
+		/* write to pipe */
+		fprintf(f, "%d %d %d\n", speed, failed, bytes);
+		fclose(f);
+		return 0;
+
+	/* parent */
+	} else {
+		f = fdopen(mypipe[0], "r");
+		if (f == NULL) {
+			perror("Open pipe for read failed: ");
+			return 3;
+		}
+
+		/* set open stream to unbuffered */
+		setvbuf(f, NULL, _IONBF, 0);
+		speed = 0;
+		failed = 0;
+		bytes = 0;
+
+		while (1) {
+			r = fscanf(f, "%d %d %d", &i, &j, &k);
+			/* r < 2 ??? */
+			if (r < 3) {
+				fprintf(stderr, "Some of our children died.\n");
+				break;
+			}
+
+			speed += i;
+			failed += j;
+			bytes += k;
+
+			/* wait for all clients finished */
+			if (--clients == 0)
+				break;
+		}
+		fclose(f);
+
+		printf("\nSpeed = %d pages/min, %d bytes/sec.\n"
+			"Requests: %d succeed, %d failed.\n",
+			(int) ((speed + failed) / (bench_time / 60.0)),
+			(int)(bytes / (float) bench_time), speed, failed);
+
+	}
+
 	return 0;
+}
+
+/*
+ *
+ */
+static void
+alarm_handler(int signal)
+{
+	timer_expired = 1;
+}
+
+/*
+ *
+ */
+void
+bench_core(const char *host, const int port, const char *req)
+{
+	int rlen;
+	char buf[1500];
+	int s, i;
+	struct sigaction sa;
+
+	/* setup alarm signal handler */
+	sa.sa_handler = alarm_handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	if (sigaction(SIGALRM, &sa, NULL) == -1) {
+		fprintf(stderr, "Setup alarm signal handler failed.\n");
+		exit(3);
+	}
+
+	alarm(bench_time);
+
+	rlen = strlen(req);
+
+next_try:
+	while(1) {
+		/* bench time is over */
+		if (timer_expired) {
+			/* why --failed ? */
+			if (failed > 0)
+				--failed;
+			return;
+		}
+
+		s = inet_connect(host, port, SOCK_STREAM);
+		if (s < 0) {
+			++failed;
+			continue;
+		}
+
+		if (rlen != write(s, req, rlen)) {
+			++failed;
+			close(s);
+			continue;
+		}
+
+		/* HTTP/0.9 */
+		if (http_ver == 0) {
+			/* shutdown — shut down socket send and receive operations */
+			/* SHUT_WR - Disables further send operations. */
+			if (shutdown(s, SHUT_WR) == -1) {
+				++failed;
+				close(s);
+				continue;
+			}
+		}
+
+		if (force == 0) {
+			/* read all avaliable data from socket */
+			while (1) {
+				if (timer_expired)
+					break;
+
+				i = read(s, buf, 1500);
+				if (i < 0) {
+					++failed;
+					close(s);
+					goto next_try;
+				} else {
+					if (i == 0)
+						break;
+					else
+						bytes += i;
+				}
+			}
+		}
+
+		if (close(s) == -1) {
+			++failed;
+			continue;
+		}
+		++speed;
+	}
 }
 
 /*
@@ -471,7 +649,3 @@ inet_connect(const char *host, int port, int type)
 	/* Return the socket_fd or -1 is error */
 	return (rp == NULL) ? -1 : socket_fd;
 }
-
-
-
-
