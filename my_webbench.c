@@ -41,10 +41,10 @@ char host[NI_MAXHOST];
 char request[REQUEST_SIZE];	/* HTTP request header */
 
 int mypipe[2];			/* internal */
-int speed = 0;
-int failed = 0;			/* failed counter */
+int speed = 0;			/* child process get reply from server */
+int failed = 0;			/* child process failed counter */
 int bytes = 0;			/* recv bytes form socket */
-volatile int timer_expired = 0;
+volatile int timer_expired = 0;	/* bench time over set to 1 */
 
 /* long options structure */
 static const struct option long_options[] = {
