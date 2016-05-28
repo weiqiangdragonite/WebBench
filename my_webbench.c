@@ -1,8 +1,15 @@
 /*
+ * (C) Radim Kolar 1997-2004
+ * This is free software, see GNU Public License version 2 for
+ * details.
+ */
+
+/*
  * Study From WebBench-1.5 Under GPLv2
  *
  * rewrite by <weiqiangdragonite@gmail.com>
  */
+
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -95,6 +102,8 @@ int tcp_connect(const char *hostname, int port);
 
 
 /*
+ * Simple forking WWW Server benchmark:
+ *
  * Usage:
  *	./webbench --help
  *
