@@ -1,9 +1,7 @@
 /*
  * Study From WebBench-1.5 Under GPLv2
  *
- * <weiqiangdragonite@gmail.com>
- *
- * Style: 8 Tab
+ * rewrite by <weiqiangdragonite@gmail.com>
  */
 
 #include <stdio.h>
@@ -13,32 +11,49 @@
 #include <getopt.h>
 #include <errno.h>
 #include <signal.h>
-
 #include <netdb.h>
+#include <sys/wait.h>
+
 
 /* Marco */
-#define PROGRAM_VERSION	"1.5"
+#define PROGRAM_VERSION		"1.5"
 
-/* Allow: GET, HEAD, OPTIONS, TRACE */
-#define METHOD_GET	0
-#define METHOD_HEAD	1
-#define METHOD_OPTIONS	2
-#define METHOD_TRACE	3
+/* Allow(HTTP Method): GET, HEAD, OPTIONS, TRACE */
+/*
+ * GET: ask a server to send a resource (请求服务器发送某个资源)
+ * HEAD: behaves like the GET method, but the server returns only the headers
+ *       in the responce (服务器在响应中只返回首部)
+ * OPTIONS: asks the server to tell us about the various supported capabilities
+ *          of the web server (请求web服务器告知其支持的各种功能)
+ * TRACE: allows clients to see how its request looks when it finally makes it
+ *        to the server (允许客户端在最终将请求发送给服务器时，看看变成什么样子)
+ *
+ * 具体可参考 <HTTP权威指南>
+ */
+#define METHOD_GET		0
+#define METHOD_HEAD		1
+#define METHOD_OPTIONS		2
+#define METHOD_TRACE		3
+
+/* 0 - http/0.9, 1 - http/1.0, 2 - http/1.1 */
+#define HTTP_0_9		0
+#define HTTP_1_0		1
+#define HTTP_1_1		2
 
 
 /* Global variables */
-int force = 0;		/* set 0 to wait for server reply */
-int force_reload = 0;	/* reload request - no cache */
-int http_ver = 1;	/* 0 - http/0.9, 1 - http/1.0, 2 - http/1.1 */
-int bench_time = 30;	/* run benchmark for 30 sec (default) */
-int clients = 1;	/* run n http clients, default n = 1 */
+int force = 0;			/* set 0 to wait for server reply */
+int force_reload = 0;		/* reload request - no cache */
+int http_ver = HTTP_1_0;	/* 0 - http/0.9, 1 - http/1.0, 2 - http/1.1 */
+int bench_time = 30;		/* run benchmark for 30 sec (default) */
+int clients = 1;		/* run n http clients, default n = 1 */
 int method = METHOD_GET;	/* HTTP method */
 char *proxy_host = NULL;	/* proxy host address */
 int proxy_port = 80;		/* proxy port, also default http 80 port */
 
-char host[NI_MAXHOST];
 #define REQUEST_SIZE	2048
 char request[REQUEST_SIZE];	/* HTTP request header */
+char host[NI_MAXHOST];		/* maximum size for a returned hostname string */
 
 int mypipe[2];			/* internal */
 int speed = 0;			/* child process get reply from server */
@@ -46,22 +61,24 @@ int failed = 0;			/* child process failed counter */
 int bytes = 0;			/* recv bytes form socket */
 volatile int timer_expired = 0;	/* bench time over set to 1 */
 
+
 /* long options structure */
+/* 参考 getopt_long() */
 static const struct option long_options[] = {
-	{"force", no_argument, &force, 1},
-	{"reload", no_argument, &force_reload, 1},
-	{"time", required_argument, NULL, 't'},
-	{"help", no_argument, NULL, 'h'},
-	{"http09", no_argument, NULL, '9'},
-	{"http10", no_argument, NULL, '1'},
-	{"http11", no_argument, NULL, '2'},
-	{"get", no_argument, &method, METHOD_GET},
-	{"head", no_argument, &method, METHOD_HEAD},
-	{"options", no_argument, &method, METHOD_OPTIONS},
-	{"trace", no_argument, &method, METHOD_TRACE},
-	{"version", no_argument, NULL, 'v'},
-	{"proxy", required_argument, NULL, 'p'},
-	{"clients", required_argument, NULL, 'c'},
+	{"force",   no_argument,       &force,         1},
+	{"reload",  no_argument,       &force_reload,  1},
+	{"time",    required_argument,  NULL,         't'},
+	{"help",    no_argument,        NULL,         'h'},
+	{"http09",  no_argument,        NULL,         '9'},
+	{"http10",  no_argument,        NULL,         '1'},
+	{"http11",  no_argument,        NULL,         '2'},
+	{"get",     no_argument,       &method,       METHOD_GET},
+	{"head",    no_argument,       &method,       METHOD_HEAD},
+	{"options", no_argument,       &method,       METHOD_OPTIONS},
+	{"trace",   no_argument,       &method,       METHOD_TRACE},
+	{"version", no_argument,        NULL,         'v'},
+	{"proxy",   required_argument,  NULL,         'p'},
+	{"clients", required_argument,  NULL,         'c'},
 	{0, 0, 0, 0}
 };
 
@@ -70,14 +87,16 @@ static const struct option long_options[] = {
 void usage(void);
 void build_request(const char *url);
 int bench(void);
-int inet_connect(const char *host, int port, int type);
-static void alarm_handler(int signal);
 void bench_core(const char *host, const int port, const char *req);
+static void alarm_handler(int signal);
+
+int inet_connect(const char *host, int port, int type);
+int tcp_connect(const char *hostname, int port);
 
 
 /*
  * Usage:
- *	webbench --help
+ *	./webbench --help
  *
  * Return:
  *	0 - success
@@ -89,15 +108,14 @@ int
 main(int argc, char *argv[])
 {
 	int opt;
-	int options_index = 0;	/* not used */
+	int options_index = 0;		/* how does this use??? */
 	char *optstring = ":h912vfrt:p:c:";
 	char *tmp = NULL;
 
 	/* check for command paramaters */
-
 	if (argc == 1) {
 		usage();
-		return 2;
+		return 1;
 	}
 
 	/* process arguments - glibc: getopt_long() */
@@ -109,7 +127,9 @@ main(int argc, char *argv[])
 
 		switch (opt) {
 		/* For long option, if flag is NULL, then return val, otherwise
-		return 0 and flag point to val. */
+		 * return 0 and flag point to val.
+		 * 举个栗子，如果参数是这样: -f 就会跳到case 'f'那里，
+		 * 如果是这样: --force 那么force就会赋值为1，getopt_long返回0 */
 		case 0:
 			break;
 		case 'f':
@@ -119,13 +139,13 @@ main(int argc, char *argv[])
 			force_reload = 1;
 			break;
 		case '9':
-			http_ver = 0;
+			http_ver = HTTP_0_9;
 			break;
 		case '1':
-			http_ver = 1;
+			http_ver = HTTP_1_0;
 			break;
 		case '2':
-			http_ver = 2;
+			http_ver = HTTP_1_1;
 			break;
 		case 't':
 			bench_time = atoi(optarg);
@@ -135,19 +155,21 @@ main(int argc, char *argv[])
 			/* strrchr() - find character from the end */
 			tmp = strrchr(optarg, ':');
 			proxy_host = optarg;
-			if (tmp == NULL)
-				break;
+
+			if (tmp == NULL)	/* cannot find ':', */
+				break;		/* proxy port use default 80 */
 			if (tmp == optarg) {
 				fprintf(stderr, "Error in option --proxy %s "
 					"(Missing hostname)\n", optarg);
 				return 1;
 			}
+			/* the optarg last character == tmp, which is ':' */
 			if (tmp == (optarg + strlen(optarg) - 1)) {
 				fprintf(stderr, "Error in option --proxy %s "
 					"(Missing prot number)\n", optarg);
 				return 1;
 			}
-			/* Be careful --> *tmp = '\0' is to end the host string */
+			/* *tmp = '\0' is to end the host string */
 			*tmp = '\0';
 			proxy_port = atoi(tmp + 1);
 			break;
@@ -155,7 +177,7 @@ main(int argc, char *argv[])
 			clients = atoi(optarg);
 			break;
 		case 'v':
-			printf("WebBench "PROGRAM_VERSION"\n");
+			printf("WebBench %s\n", PROGRAM_VERSION);
 			return 0;
 		case ':':
 			fprintf(stderr, "Missing argument (-%c)\n", optopt);
@@ -169,12 +191,13 @@ main(int argc, char *argv[])
 			return 1;
 		}
 	}
-
+	/* optind -- argv 的当前索引值 */
 	if (optind == argc) {
 		fprintf(stderr, "webbench: Missing URL!\n");
 		usage();
 		return 1;
 	}
+
 
 	if (clients == 0)
 		clients = 1;
@@ -184,10 +207,10 @@ main(int argc, char *argv[])
 	/* Print Copyright */
 	/* Why use stderr? because un-buffer? */
 	fprintf(stderr, "WebBench - Simple Web Benchmark "PROGRAM_VERSION"\n"
-		"Copyright (c)  Radim Kolar 1997-2004, GPL Open Source Software.\n");
+		"Copyright (c)  Radim Kolar 1997-2004, "
+		"GPL Open Source Software.\n");
 
 	build_request(argv[optind]);
-
 
 	/* print bench info */
 	printf("\nBenchmarking: ");
@@ -209,13 +232,13 @@ main(int argc, char *argv[])
 	printf(" %s", argv[optind]);
 
 	switch (http_ver) {
-	case 0:
+	case HTTP_0_9:
 		printf(" HTTP/0.9");
 		break;
-	case 2:
+	case HTTP_1_1:
 		printf(" HTTP/1.1");
 		break;
-	case 1:
+	case HTTP_1_0:
 	default:
 		printf(" HTTP/1.0");
 		break;
@@ -227,10 +250,13 @@ main(int argc, char *argv[])
 	else
 		printf("%d clients", clients);
 	printf(", running %d sec", bench_time);
+
 	if (force)
 		printf(", early socket close");
+
 	if (proxy_host != NULL)
 		printf(", via proxy server %s:%d", proxy_host, proxy_port);
+
 	if (force_reload)
 		printf(", forcing reload");
 	printf(".\n");
@@ -265,6 +291,7 @@ usage(void)
 /*
  * Build the reuqest header, such:
  * GET /abc HTTP/1.0\r\n
+ * Host: xxx
  * Connection: close\r\n
  * \r\n
  */
@@ -277,22 +304,23 @@ build_request(const char *url)
 	memset(request, 0, REQUEST_SIZE);
 	memset(host, 0, NI_MAXHOST);
 
-	/* Need HTTP knowledge to know why */
+
+	/* Need HTTP knowledge to know why, 请阅读 <HTTP权威指南> */
 	/* Proxy and force reload need HTTP/1.0 or HTTP/1.1 */
-	if (force_reload && proxy_host != NULL && http_ver < 1)
-		http_ver = 1;
+	if (force_reload && proxy_host != NULL && http_ver < HTTP_1_0)
+		http_ver = HTTP_1_0;
 
 	/* HEAD need HTTP/1.0 or HTTP/1.1 */
-	if (method == METHOD_HEAD && http_ver < 1)
-		http_ver = 1;
+	if (method == METHOD_HEAD && http_ver < HTTP_1_0)
+		http_ver = HTTP_1_0;
 
 	/* Options need HTTP/1.1 */
-	if (method == METHOD_OPTIONS && http_ver < 2)
-		http_ver = 2;
+	if (method == METHOD_OPTIONS && http_ver < HTTP_1_1)
+		http_ver = HTTP_1_1;
 
 	/* TRACE need HTTP/1.1 */
-	if (method == METHOD_TRACE && http_ver < 2)
-		http_ver = 2;
+	if (method == METHOD_TRACE && http_ver < HTTP_1_1)
+		http_ver = HTTP_1_1;
 
 
 	switch (method) {
@@ -310,9 +338,9 @@ build_request(const char *url)
 		strncpy(request, "GET", REQUEST_SIZE);
 		break;
 	}
-
 	strcat(request, " ");
 
+	/* strstr(): find substring */
 	if (strstr(url, "://") == NULL) {
 		fprintf(stderr, "\n%s: is not a valid URL.\n", url);
 		exit(1);
@@ -323,7 +351,7 @@ build_request(const char *url)
 	}
 
 	if (proxy_host == NULL) {
-		/* compare two strings ignoring case */
+		/* compare two strings ignoring case, compare first n bytes */
 		if (strncasecmp("http://", url, 7) != 0) {
 			fprintf(stderr, "\nOnly HTTP protocol is directly "
 				"supported, set --proxy for others.\n");
@@ -335,42 +363,54 @@ build_request(const char *url)
 	/* If url is "http://abc.com/", then i = 7 */
 	i = strstr(url, "://") - url + 3;
 
+	/* URL格式: http://abc.com/    不能是 http://abc.com */
+	/* http://abc.com/a.html  这样也是正确的 */
 	if (strchr(url+i, '/') == NULL) {
-		fprintf(stderr, "\nInvalid URL syntax - hostname must ends with '/'");
+		fprintf(stderr, "\nInvalid URL syntax - "
+			"hostname must ends with '/'\n");
 		exit(1);
 	}
 
 	if (proxy_host == NULL) {
 		/* get host and port from hostname */
 		/* if url is "http://abc.com:10086/test", then
-		host = "abc.com", port = 10086, request = GET /test */
-		if (index(url+i, ':') != NULL &&
-		(index(url+i, ':') < index(url+i, '/'))) {
+		 * host = "abc.com", port = 10086, request = GET /test */
+		/* index() - locate character in string */
+		if (index(url+i, ':') != NULL
+			&& (index(url+i, ':') < index(url+i, '/')))
+		{
 			strncpy(host, url+i, strchr(url+i, ':') - url - i);
 			memset(tmp, 0, sizeof(tmp));
 			strncpy(tmp, index(url+i, ':') + 1,
 				strchr(url+i, '/') - index(url+i, ':') - 1);
 			proxy_port = atoi(tmp);
 		} else {
-			/* strcspn - get length of a prefix substring */
+			/* url is http://www.abc.com/test */
+			/* strcspn() - get length of a prefix substring */
+			/* host = www.abc.com */
 			strncpy(host, url + i, strcspn(url+i, "/"));
 		}
 		/* printf("host = %s, port = %d\n", host, proxy_port); */
 		/* printf("strcspn(url+i, /) = %d\n", (int) strcspn(url+i, "/")); */
+
 		strcat(request + strlen(request), url + i + strcspn(url+i, "/"));
 	} else {
 		/* Need proxy knowledge */
 		strcat(request, url);
 	}
-	printf("rqeuest = %s\n", request);
+	/* printf("rqeuest = %s\n", request); */
 
-	if (http_ver == 1)
+
+	if (http_ver == HTTP_1_0)
 		strcat(request, " HTTP/1.0");
-	else if (http_ver == 2)
+	else if (http_ver == HTTP_1_1)
 		strcat(request, " HTTP/1.1");
 	strcat(request, "\r\n");
 
-	if (proxy_host == NULL && http_ver > 0) {
+	if (http_ver > HTTP_0_9)
+		strcat(request, "User-Agent: WebBench "PROGRAM_VERSION"\r\n");
+
+	if (proxy_host == NULL && http_ver > HTTP_0_9) {
 		strcat(request, "Host: ");
 		strcat(request, host);
 		strcat(request, "\r\n");
@@ -381,13 +421,14 @@ build_request(const char *url)
 		strcat(request, "Pragma: no-cache\r\n");
 
 	/* HTTP/1.1 default is keep-alive */
-	if (http_ver > 1)
+	if (http_ver > HTTP_1_0)
 		strcat(request, "Connection: close\r\n");
 
 	/* The last blank line */
-	if (http_ver > 0)
+	if (http_ver > HTTP_0_9)
 		strcat(request, "\r\n");
 }
+
 
 /*
  *
@@ -395,20 +436,19 @@ build_request(const char *url)
 int
 bench(void)
 {
-	int i, j, k, r;
+	int i, j, k, n;
 	FILE *f;
 	pid_t pid = 0;
 
 	/* check avaibility of target server */
-	i = inet_connect(proxy_host == NULL ? host : proxy_host,
-		proxy_port, SOCK_STREAM);
+	i = tcp_connect(proxy_host == NULL ? host : proxy_host, proxy_port);
 	if (i < 0) {
 		fprintf(stderr, "\nConnect to server failed. Aborting benchmark.\n");
 		return 2;
 	}
 	close(i);
 
-	/* create pipe */
+	/* create pipe, 无名管道 */
 	if (pipe(mypipe) == -1) {
 		perror("PIPE failed: ");
 		return 3;
@@ -420,9 +460,12 @@ bench(void)
 		if (pid <= (pid_t) 0) {
 			/* child process or error */
 			/* make childs faster */
+			/* 生成的孩子如果立即进入睡眠，就能保证父进程能继续运行，
+			 * 从而继续生成孩子 */
 			sleep(1);
 			break;
 		}
+		/* parent continue make childs */
 	}
 
 	/* error */
@@ -432,15 +475,15 @@ bench(void)
 		return 3;
 	}
 
-	/* child */
+	/* child processes */
+	/* 子进程进行压力测试，并把结果写到管道 */
 	if (pid == (pid_t) 0) {
-		if (proxy_host == NULL)
-			bench_core(host, proxy_port, request);
-		else
-			bench_core(proxy_host, proxy_port, request);
+		bench_core(proxy_host == NULL ? host : proxy_host,
+			proxy_port, request);
 
 		/* write results to pipe */
 		/* pipe[0] for read; pipe[1] for write */
+		close(mypipe[0]);
 		f = fdopen(mypipe[1], "w");
 		if (f == NULL) {
 			perror("Open pipe for write failed: ");
@@ -450,10 +493,12 @@ bench(void)
 		/* write to pipe */
 		fprintf(f, "%d %d %d\n", speed, failed, bytes);
 		fclose(f);
-		return 0;
+		return 0;	/* exit(0); */
 
-	/* parent */
+	/* parent process */
+	/* 父进程从管道中读取结果，并做最后的统计分析 */
 	} else {
+		close(mypipe[1]);
 		f = fdopen(mypipe[0], "r");
 		if (f == NULL) {
 			perror("Open pipe for read failed: ");
@@ -462,14 +507,12 @@ bench(void)
 
 		/* set open stream to unbuffered */
 		setvbuf(f, NULL, _IONBF, 0);
-		speed = 0;
-		failed = 0;
-		bytes = 0;
 
 		while (1) {
-			r = fscanf(f, "%d %d %d", &i, &j, &k);
-			/* r < 2 ??? */
-			if (r < 3) {
+			/* 从管道获取数据 */
+			n = fscanf(f, "%d %d %d", &i, &j, &k);
+			/* 这里没看懂是什么意思??? */
+			if (n < 2) {
 				fprintf(stderr, "Some of our children died.\n");
 				break;
 			}
@@ -479,6 +522,7 @@ bench(void)
 			bytes += k;
 
 			/* wait for all clients finished */
+			waitpid(-1, NULL, 0);
 			if (--clients == 0)
 				break;
 		}
@@ -487,15 +531,15 @@ bench(void)
 		printf("\nSpeed = %d pages/min, %d bytes/sec.\n"
 			"Requests: %d succeed, %d failed.\n",
 			(int) ((speed + failed) / (bench_time / 60.0)),
-			(int)(bytes / (float) bench_time), speed, failed);
-
+			(int) (bytes / (float) bench_time),
+			speed, failed);
 	}
 
 	return 0;
 }
 
 /*
- *
+ * alarm handler function
  */
 static void
 alarm_handler(int signal)
@@ -504,7 +548,13 @@ alarm_handler(int signal)
 }
 
 /*
+ * 每个子进程都会执行
+ * 设置一个定时器（压力测试的时间），在该时间内不断地连接服务器，发送数据，
+ * 接收数据，并进行计数
  *
+ * failed: 失败次数计数器
+ * speed: 成功次数计数器
+ * bytes: 读取字节总数
  */
 void
 bench_core(const char *host, const int port, const char *req)
@@ -523,26 +573,28 @@ bench_core(const char *host, const int port, const char *req)
 		exit(3);
 	}
 
-	alarm(bench_time);
-
 	rlen = strlen(req);
+	/* start alarm */
+	alarm(bench_time);
 
 next_try:
 	while(1) {
 		/* bench time is over */
 		if (timer_expired) {
-			/* why --failed ? */
+			/* why??? 这里为什么要减掉一个failed计数器 */
 			if (failed > 0)
 				--failed;
-			return;
+			return;		/* 函数只能从这里返回 */
 		}
 
-		s = inet_connect(host, port, SOCK_STREAM);
+		s = tcp_connect(host, port);
 		if (s < 0) {
 			++failed;
 			continue;
 		}
 
+		/* send request to server */
+		/* 这里最好用UNP: writen() */
 		if (rlen != write(s, req, rlen)) {
 			++failed;
 			close(s);
@@ -550,7 +602,7 @@ next_try:
 		}
 
 		/* HTTP/0.9 */
-		if (http_ver == 0) {
+		if (http_ver == HTTP_0_9) {
 			/* shutdown — shut down socket send and receive operations */
 			/* SHUT_WR - Disables further send operations. */
 			if (shutdown(s, SHUT_WR) == -1) {
@@ -560,6 +612,7 @@ next_try:
 			}
 		}
 
+		/* wait for server reply */
 		if (force == 0) {
 			/* read all avaliable data from socket */
 			while (1) {
@@ -572,7 +625,7 @@ next_try:
 					close(s);
 					goto next_try;
 				} else {
-					if (i == 0)
+					if (i == 0)	/* EOF */
 						break;
 					else
 						bytes += i;
@@ -587,6 +640,64 @@ next_try:
 		++speed;
 	}
 }
+
+
+
+
+/*
+ * Copy from UNP
+ *
+ * for tcp client: create tcp socket and connect to server
+ * if success return socket fd, otherwise return -1
+ */
+int
+tcp_connect(const char *hostname, int port)
+{
+	int sockfd, n;
+	struct addrinfo hints, *res, *rp;
+	char service[NI_MAXSERV];
+
+	memset(service, 0, NI_MAXSERV);
+	snprintf(service, NI_MAXSERV, "%d", port);
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;	/* IPv4, IPv6 */
+	hints.ai_socktype = SOCK_STREAM;
+
+	if ((n = getaddrinfo(hostname, service, &hints, &res)) != 0) {
+		fprintf(stderr, "tcp_connect - getaddrinfo() failed: %s\n",
+			gai_strerror(n));
+		return -1;
+	}
+
+
+	for (rp = res; rp != NULL; rp = rp->ai_next) {
+		sockfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+
+		/* If error, try next address */
+		if (sockfd == -1)
+			continue;
+
+		/* Try to connect socket */
+		if (connect(sockfd, rp->ai_addr, rp->ai_addrlen) != -1)
+			break;	/* success */
+
+		/* Connect failed: close this socket and try next address */
+		close(sockfd);
+	}
+
+	/* error from final connect() or socket() */
+	if (rp == NULL) {
+		fprintf(stderr, "tcp_connect failed for %s, %s\n",
+			hostname, service);
+		sockfd = -1;
+	}
+
+	freeaddrinfo(res);
+
+	return sockfd;
+}
+
 
 /*
  * Copy from TLPI
@@ -649,3 +760,4 @@ inet_connect(const char *host, int port, int type)
 	/* Return the socket_fd or -1 is error */
 	return (rp == NULL) ? -1 : socket_fd;
 }
+
