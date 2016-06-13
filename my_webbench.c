@@ -8,6 +8,8 @@
  * Study From WebBench-1.5 Under GPLv2
  *
  * rewrite by <weiqiangdragonite@gmail.com>
+ *
+ * proxy未测试
  */
 
 
@@ -697,8 +699,8 @@ tcp_connect(const char *hostname, int port)
 
 	/* error from final connect() or socket() */
 	if (rp == NULL) {
-		fprintf(stderr, "tcp_connect failed for %s, %s\n",
-			hostname, service);
+		fprintf(stderr, "tcp_connect failed for %s, %s (%s)\n",
+			hostname, service, strerror(errno));
 		sockfd = -1;
 	}
 

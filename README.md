@@ -64,4 +64,4 @@ webbench测试结果
 	Speed=3230 pages/min, 11614212 bytes/sec.
 	Requests: 1615 susceed, 0 failed.
 
-分析：每秒钟响应请求数：3230 pages/min，每秒钟传输数据量11614212 bytes/sec.
+分析：每分钟响应请求数：3230 pages/min，每秒钟传输数据量11614212 bytes/sec.
